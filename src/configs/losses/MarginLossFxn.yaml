@@ -1,0 +1,7 @@
+MarginLossFxn:
+    - _target_: loss.MarginScheduledTripletLossFunction
+    - margin: 0.25
+    - seed: 123
+    - distance:
+        - _target_: loss.sigmoid_cosine_distance_p
+        - p: 1

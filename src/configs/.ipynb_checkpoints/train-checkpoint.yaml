@@ -1,0 +1,8 @@
+defaults:
+    - _self_
+    - data: data/train-val-test
+    - model: models/model2
+    - losses@Loss1: MarginLossFxn
+    - losses@Loss2: BCELossFxn
+
+alternateEpochs: False

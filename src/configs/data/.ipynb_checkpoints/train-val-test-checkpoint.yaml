@@ -1,0 +1,20 @@
+dataloader:
+    _target_: torch.utils.data.DataLoader
+    batch_size: 1
+    shuffle: False
+    
+dataset:
+    _target_:  dataset.LysineDataset
+    ID_col: 'Accession'
+    biotins_locs_col: 'BiotinPosition'
+    seq_col: 'seq'
+    embeddings_path: '/cwork/pkp14/Biotin/esm2_15b_embeds'
+    train:
+        file: /hpc/group/soderlinglab/user/pooja/projects/Biotin/data/train-val-test/train.csv
+
+    val:
+        file: /hpc/group/soderlinglab/user/pooja/projects/Biotin/data/train-val-test/val.csv
+
+    test:
+        file: /hpc/group/soderlinglab/user/pooja/projects/Biotin/data/train-val-test/test.csv
+        

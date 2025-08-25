@@ -1,0 +1,7 @@
+out_dim: 1280
+
+esm2_15b:
+    - _target_: model.Model1
+    - in_dim: 5120
+    - hidden_dim: 2560
+    - out_dim: ${..out_dim}
