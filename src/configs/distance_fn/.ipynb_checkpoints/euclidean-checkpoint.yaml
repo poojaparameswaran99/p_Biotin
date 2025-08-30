@@ -1,2 +1,0 @@
-_target_: torch.nn.functional.pairwise_distance
-_partial_: True
