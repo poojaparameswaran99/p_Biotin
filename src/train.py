@@ -28,22 +28,6 @@ sys.path.append(os.path.expanduser('~/soderlinglab/user/pooja/projects/Biotin/sr
 
 # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=3)
 
-## architecture
-## extract Lysine residues and parse through model.
-### update margin as you train.. with some annealer?
-## switch off epochs for diff losses, or...
-## weight on each loss. in the addendum or bakcprop.
-### how much to update weights on losses 
-
-## any manipulation on BCE loss?9
-### update margin as you train.. with some annealer?
-## switch off epochs for diff losses, or...
-## weight on each loss. in the addendum or bakcprop.
-### how much to update weights on losses 
-
-
-#### actionables
-## update lr and margin according to an annealing scheme.
 @hydra.main(version_base=None, config_path="configs", config_name="trainn")
 def main(cfg: DictConfig): # 
     cfg = OmegaConf.to_container(cfg, resolve = True)
@@ -71,8 +55,8 @@ def validate(cfg, val_loader, model, Loss1, Loss2, alpha):
             loss1 = Loss1(embed, pos_len)
             loss2 = Loss2(preds, labels) ## params
             # Backward pass
-            l += (alpha*loss1 + (1-alpha)*loss2).item()
-#             l += loss2
+#             l += (alpha*loss1 + (1-alpha)*loss2).item()
+            l += loss2
     loss = l/len(val_loader)
     total_labels = torch.cat(total_labels)
     total_preds = torch.cat(total_preds)
@@ -113,7 +97,7 @@ def train_model(cfg):
     time = datetime.now().strftime("%m_%d-%H_%M")
     nae = cfg['n_alternate_epoch']
     NAME = f"alternatEpoch{nae}_{m}" if alternate_epochs else f"not"
-    group = cfg["wandb"]["group"]   # <- this will be "euclidean"
+    group = cfg["wandb"]["group"]  
     proj = cfg['project']
     seed = cfg['seed']
     
@@ -167,8 +151,8 @@ def train_model(cfg):
             loss2 =  Loss2(preds, labels) ## params
             
             ## alternate loss backprop w set alpha
-            l = alpha*loss1 + (1-alpha)*loss2
-#             l = loss2
+#             l = alpha*loss1 + (1-alpha)*loss2
+            l = loss2
             l.backward()
     
             ## optimizer step
@@ -179,7 +163,11 @@ def train_model(cfg):
             ## flatten for metrics
             labels = labels.flatten().detach().cpu().clone()
             preds = preds.flatten().detach().cpu().clone()
+        
+        ## validate
         v_acc, v_auroc, v_aupr, v_CM, v_loss = validate(cfg, val_loader, model, Loss1, Loss2, alpha)
+        
+        ## log val metrics
         val_metrics = {"acc": float(v_acc), "loss": float(v_loss), 'auroc': float(v_auroc), 'aupr': float(v_aupr)}
         run.log(val_metrics)
         print(f'Epoch [{epoch+1}/{num_epochs}]; Val Loss: {v_loss:.4f}')
@@ -209,4 +197,3 @@ def train_model(cfg):
 
 if __name__ == "__main__":
     main()
-
