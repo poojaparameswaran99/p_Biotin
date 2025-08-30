@@ -1,2 +1,1 @@
-BCELossFxn:
-    - _target_: loss.BCELoss
+_target_: loss.BCELoss

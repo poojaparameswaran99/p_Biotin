@@ -6,9 +6,11 @@ dataloader:
 dataset:
     _target_:  dataset.LysineDataset
     ID_col: 'Accession'
-    biotins_locs_col: 'BiotinPosition'
+    biotin_locs_col: 'BiotinPosition'
     seq_col: 'seq'
     embeddings_path: '/cwork/pkp14/Biotin/esm2_15b_embeds'
+
+splits:
     train:
         file: /hpc/group/soderlinglab/user/pooja/projects/Biotin/data/train-val-test/train.csv
 
@@ -17,4 +19,3 @@ dataset:
 
     test:
         file: /hpc/group/soderlinglab/user/pooja/projects/Biotin/data/train-val-test/test.csv
-        

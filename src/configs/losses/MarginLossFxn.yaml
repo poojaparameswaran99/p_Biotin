@@ -1,7 +1,5 @@
-MarginLossFxn:
-    - _target_: loss.MarginScheduledTripletLossFunction
-    - margin: 0.25
-    - seed: 123
-    - distance:
-        - _target_: loss.sigmoid_cosine_distance_p
-        - p: 1
+_target_: loss.MarginScheduledTripletLossFunction
+anneal_fn: ${anneal_fn}
+distance_fn: ${distance_fn}    # <— copies the selected distance config node here
+N_restart: 10
+step_per_call: false

@@ -1,0 +1,3 @@
+_target_: loss.sigmoid_cosine_distance_p
+_partial_: True
+p: 1

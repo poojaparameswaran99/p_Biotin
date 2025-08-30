@@ -1,13 +1,13 @@
 out_dim: 1280
 
 esm2_15b:
-    _target_: model.Model2
+    _target_: model.Model4
     in_dim: 5120
     hidden_dim: 2560
     out_dim: ${..out_dim}
 
 esm2_650m:
-    _target_: model.Model2
+    _target_: model.Model4
     in_dim: 1280
     hidden_dim: 1280
     out_dim: ${..out_dim}

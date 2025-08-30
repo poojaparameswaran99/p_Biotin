@@ -1,8 +1,54 @@
 defaults:
     - _self_
-    - data: data/train-val-test
-    - model: models/model2
+    - data: train-val-test
+    - models: model4
     - losses@Loss1: MarginLossFxn
     - losses@Loss2: BCELossFxn
+    - distance_fn: sig_cos_d
+    - anneal_fn: tanh_decay
+    - override hydra/sweeper: basic #gride
+#     - override hydra/sweeper/sampler: nsgaii
+    - override hydra/launcher: submitit_slurm
+    
+wandb:
+  project: biotin
+  group: ${hydra:runtime.choices.distance}  
 
-alternateEpochs: False
+n_epochs: 50
+lr: 0.00001
+alternate_epochs: True
+n_alternate_epoch: 5
+burn_in_epochs: 10
+job_type: 'training'
+loss1_weight: 0.5
+project: 'biotin-model4-BCEloss'
+seed: 123
+
+
+
+hydra:
+    launcher:
+        timeout_min: 280 # 2 hours
+        tasks_per_node: 1
+        array_parallelism: 3   # run up to 3 jobs at once
+        cpus_per_task: 1
+        nodes: 1
+        name: ${hydra.job.name}
+        partition: singhlab-gpu
+        account: singhlab
+        mem_gb: 32
+        additional_parameters:
+          gres: gpu:1
+        stderr_to_stdout: true
+
+    sweeper:
+#         sampler:
+#             _target_:  optuna.samplers.NSGAIISampler
+#         direction: minimize
+#         study_name: biotin
+#         n_trials: 27
+#         n_jobs: 3
+        params:
+#             loss1_weight: 0.2,0.5,0.8
+            anneal_fn.M_0: 0.25,0.5
+            alternate_epochs: True

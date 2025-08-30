@@ -1,0 +1,4 @@
+_target_: loss.tanh_decay
+_partial_: True
+M_0: 0.25
+N_restart: ${Loss1.N_restart}
