@@ -11,6 +11,7 @@ from pathlib import Path
 import h5py
 import torch
 
+
 ## biotin locs are based on 1 indexing. transform for python 0 indexing
 class LysineDataset(Dataset):
     def __init__(self, file, ID_col, biotin_locs_col, seq_col, embeddings_path):
@@ -38,43 +39,45 @@ class LysineDataset(Dataset):
         self.ID = re.split(r'[;,]', self.df.iloc[idx][self.ID_col])[0]
         self.seq = self.df.iloc[idx][self.seq_col]
         self.embedding = self._pull_embedding(self.ID)
-        pos = ast.literal_eval(self.df.iloc[idx][self.biotin_locs_col])
-        self.positives = self._adjust_indexing(pos)
-        self._get_negatives()
+        raw_pos = set(map(int, ast.literal_eval(self.df.iloc[idx][self.biotin_locs_col])))
+        positives = self._adjust_indexing(raw_pos)
+        negatives = self._get_negatives(positives)
         
         ## check res
-        self.positives = self._check_residue(self.positives)
-        self.negatives = self._check_residue(self.negatives)
-        
+        positives = self._check_residue(positives)
+#         self.negatives = self._check_residue(self.negatives)
         # get vectors
-        pos_vectors = self._get_vectors(self.positives)   
-        neg_vectors = self._get_vectors(self.negatives)   
+        pos_vectors = self._get_vectors(positives)    # [n, 5120]
+        neg_vectors = self._get_vectors(negatives)
         
         # Combine all vectors and create labels
         all_vectors = torch.cat([pos_vectors, neg_vectors], dim=0)
-        labels = torch.cat([torch.ones(len(pos_vectors)), 
-                           torch.zeros(len(neg_vectors))])  
+        plab = torch.ones(pos_vectors.shape[0])
+        nlab = torch.zeros(neg_vectors.shape[0])
+        labels = torch.cat([plab, nlab]) 
+        assert len(plab) == len(nlab), f'pos:{len(positives)}; neg:{len(negatives)}; pos_vect:{len(pos_vectors)}; neg_vect:{len(neg_vectors)}, plab:{len(plab)}, nlab:{len(nlab)}'
         return all_vectors, labels, len(pos_vectors)
     
     def _adjust_indexing(self, l):
         return set(list(map(lambda x: int(x - 1), l)))
     
-    def _get_negatives(self):
+    def _get_negatives(self, p):
         self.lysine_locs = set([x.start() for x in re.finditer('K', self.seq)])
-        self.negatives = self.lysine_locs - self.positives
-        if not self.negatives or len(self.negatives) < len(self.positives):
-            self.sample_random_negatives
-        return
+        n = sorted(list(self.lysine_locs - p))
+        n = np.random.choice(n, size=len(p), replace=True)
+        if len(set(n)) < len(p):
+            n = self.sample_random_negatives(set(n), p)
+        return n
     
-    def sample_random_negatives(self):
-        n_negs = len(self.positives)
-        negs = set(range(len(self.seq))) - self.positives
-        extra_negs= np.random.choice(negs, size=n_negs, replace=False)
-        return self.negatives.update(extra_negs)
+    def sample_random_negatives(self, n, p):
+        negs = set(range(len(self.seq))) - p -n
+        extra_negs= np.random.choice(list(negs), size=len(p)-len(n), replace=False)
+        n.update(extra_negs)
+        return n
     
     def _get_vectors(self, positions):
-        if not positions:
-            print(self.ID, positions, self.lysine_locs, self.positives)
+        if len(positions) == 0:
+            raise ValueError("No positions found for this protein.")
         myembeds = []
         for i in positions:
             try:
@@ -88,3 +91,4 @@ class LysineDataset(Dataset):
         with h5py.File(Path(self.embeddings_path) / f'{seq_id}.h5', 'r') as f:  # Added 'r' mode
             embdg = torch.tensor(f[f'{seq_id}_representation'][:])
         return embdg
+

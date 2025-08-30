@@ -95,10 +95,11 @@ def train_model(cfg):
     print('training on DEVICE', DEVICE)
     
     ## instantiate
-    Loss1 = hydra.utils.instantiate(cfg['Loss1'])
-    Loss2 = hydra.utils.instantiate(cfg['Loss2'])
+    Loss1 = hydra.utils.instantiate(cfg['Loss1']) ## triplet margin distance loss
+    Loss2 = hydra.utils.instantiate(cfg['Loss2']) ## bce
     model = hydra.utils.instantiate(cfg['models']['esm2_15b'])
     BURN_IN = cfg['burn_in_epochs']
+    
     # Training parameters
     alternate_epochs = bool(cfg.get('alternate_epochs', False))
     num_epochs = cfg['n_epochs']
@@ -115,6 +116,8 @@ def train_model(cfg):
     group = cfg["wandb"]["group"]   # <- this will be "euclidean"
     proj = cfg['project']
     seed = cfg['seed']
+    
+    ## seed
     torch.manual_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
@@ -129,8 +132,8 @@ def train_model(cfg):
         group=str(group),
         config=cfg,
         )
+    
     model.to(DEVICE)
-    ## make hydra compatible
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
     for epoch in range(num_epochs):
         model.train()
@@ -142,28 +145,37 @@ def train_model(cfg):
         pnc = Counter()
         for batch_idx, batch in enumerate(train_loader):
             embed, labels, pos_len= batch # seq_embedding, biotin_pos
+            
+            ## count pos and neg
             pnc.update(labels.view(-1).tolist())
+            
+            ## move to device
             embed = embed.to(DEVICE)
             labels = labels.to(DEVICE).float()
             pos_len = pos_len.to(DEVICE)
-            # Create model for this sequence
+            
+            # run model for this sequence (batch size always 1)
             embed, preds = model(embed)
-            embed = embed.squeeze(0)
-            # Create optimizer for this model
+            embed = embed.squeeze(0) # remove batch dim for inutitive passing thru loss
+            preds = preds.squeeze(-1) ## match label dims
+
             # Zero gradients
             optimizer.zero_grad(set_to_none=True)
-            preds = preds.squeeze(-1)
+            
             # Calculate loss
             loss1 = Loss1(embed, pos_len)
             loss2 =  Loss2(preds, labels) ## params
+            
+            ## alternate loss backprop w set alpha
             l = alpha*loss1 + (1-alpha)*loss2
 #             l = loss2
             l.backward()
+    
             ## optimizer step
             optimizer.step()
             ## update margin
             Loss1.step()
-            ## dim as [b, nr, 1], FLATTEN TO nr only for metrics
+            
             ## flatten for metrics
             labels = labels.flatten().detach().cpu().clone()
             preds = preds.flatten().detach().cpu().clone()
@@ -171,6 +183,8 @@ def train_model(cfg):
         val_metrics = {"acc": float(v_acc), "loss": float(v_loss), 'auroc': float(v_auroc), 'aupr': float(v_aupr)}
         run.log(val_metrics)
         print(f'Epoch [{epoch+1}/{num_epochs}]; Val Loss: {v_loss:.4f}')
+        
+        ## log best model
         if v_loss < min_loss and epoch > BURN_IN:
             safe_pnc = float(pnc) if hasattr(pnc, "__float__") else pnc
             val_metrics.update({'epoch' : epoch, 'pnc': safe_pnc})
@@ -178,7 +192,6 @@ def train_model(cfg):
                          'preds_min': preds.min().item(),
                          'preds_max': preds.max().item(), 'margin': float(Loss1.margin)
                          }
-            
             art = wandb.Artifact(name=f"{NAME}-eval", type="eval", metadata=extra_data)
             with art.new_file("val_metrics.json", mode="w") as f:
                 json.dump(val_metrics
@@ -188,8 +201,8 @@ def train_model(cfg):
             run.log_artifact(art, aliases=["best"])
             torch.save(model.state_dict(), f'/cwork/pkp14/Biotin/models/{NAME}.pth')
             print(f"New best model @ epoch {epoch} saved with loss: {v_loss:.4f}")
-            print(f'POS:NEG ratio {pnc}')
             min_loss = v_loss
+
     run.finish()
     return
 

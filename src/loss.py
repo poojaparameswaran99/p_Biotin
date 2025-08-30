@@ -7,9 +7,11 @@ from torch import nn
 import torch.nn.functional as F
 import torch
 import h5py
+from typing import Optional
+from torch import Tensor
 from pathlib import Path
 from functools import partial
-from loss_modules import _WeightedLoss, _Loss
+from torch.nn.modules.loss import _WeightedLoss, _Loss
 ## distance funcs
 
 def sigmoid_cosine_distance_p(x, y, p=1): # p is weighting factor
@@ -20,115 +22,91 @@ def sigmoid_cosine_distance_p(x, y, p=1): # p is weighting factor
 DISTANCE_FN_DICT = {'sigmoid_cosine_distance_p': sigmoid_cosine_distance_p,
                    'euclidean': None}
 
-def tanh_decay():
-     
-    return
+def tanh_decay(M_0, N_restart, x):
+    return float(M_0 * (1.0 - np.tanh(2.0 * x / max(1, N_restart))))
 
-def cosine_decay():
-    
-    return
+def cosine_anneal(M_0, N_restart, x):
+    return float(0.5 * M_0 * (1.0 + np.cos(np.pi * x / max(1, N_restart))))
 
-class MarginScheduledTripletLossFunction(nn.Module):
-    def __init__(self, p, distance, margin=0.25, seed=123):
-        super().__init__()
+def no_decay(M_0, N_restart, x):
+    return float(M_0)
+
+MARGIN_FN_DICT = {
+    "tanh_decay": tanh_decay,
+    "cosine_anneal": cosine_anneal,
+    "no_decay": no_decay,
+}
+
+
+class MarginScheduledTripletLossFunction():
+    def __init__(self, distance_fn, anneal_fn, N_restart: int =10, seed=123, step_per_call=False):
         ## could change into sigmoid_cosine_distance_p
-        self.criterion = nn.TripletMarginWithDistanceLoss(distance_function= distance ,margin=margin, swap=False, reduction='mean')
+        self._dist = distance_fn        
+        self._anneal = anneal_fn  
+        self.N_restart = int(N_restart)
+        self._step = 0
+        self.step_per_call = bool(step_per_call)
+        self.M_curr = float(self._anneal(x=0))
         self.seed = seed
     
-    def forward(self, latent, pos_len):
-        """
-        Args:
-            latent: [total_residues, embedding_dim] - embeddings from model
-            labels: [total_residues] - 1 for positive, 0 for negative  
-            pos_len: list of positive counts per protein in batch
-        """
-        torch.manual_seed(self.seed)
+    ## only referenced upon call on local script
+    @property
+    def margin(self) -> float:
+        return float(self.M_curr)
+
+    def step(self):
+        self._step += 1
+        x = self._step % self.N_restart
+        self.M_curr = float(self._anneal(x=x)) ## update margin fn
+
+    def reset(self):
+        self._step = 0
+        self.M_curr = self._anneal(x=0) ## update_margin_fn
+
+    @torch.no_grad()
+    def _sample_indices(self, N_pos, N_total, device):
+        # anchors: all positives [0..N_pos-1]
+        pos_idx = torch.arange(N_pos, device=device)
+        print(pos_idx)
+        neg_idx = torch.arange(N_pos, N_total, device=device)
+
+        if neg_idx.numel() == 0:
+            raise ValueError("No negatives available: N_total must be > N_pos.")
+        # pos could be self
+        pos_perm = torch.randperm(N_pos, device=device)
+        pos_samples = pos_idx[pos_perm]
+        neg_samples = neg_idx[torch.randperm(len(neg_idx), device=device)[:N_pos+1]]
+        print('in loss, pos samples len: ', len(pos_samples))
+        print('in loss, neg samples len: ', len(neg_samples))
         
-        pos_idx = torch.arange(0, pos_len.item())
-        neg_idx = torch.arange(pos_len.item(), latent.shape[0])
-        
-        num_triplets = len(pos_idx)
-        pos_samples = pos_idx[torch.randint(0, len(pos_idx), (num_triplets,))]
-        neg_samples = neg_idx[torch.randint(0, len(neg_idx), (num_triplets,))]
-        
-        ## slice 
-        anchors = latent[pos_idx]
-        positives = latent[pos_samples]
-        negatives = latent[neg_samples]
-        
-        loss = self.criterion(anchors, positives, negatives)
-        
-        return loss  # Avoid division by zero
+        return pos_idx, pos_samples, neg_samples
 
+    def __call__(self, latent: torch.Tensor, pos_len):
+        if isinstance(pos_len, torch.Tensor):
+            pos_len = int(pos_len.item())
+        N, D = latent.shape
+        if not (0 < pos_len < N):
+            raise ValueError(f"pos_len must be in (0,{N}), got {pos_len}.")
 
-# # distance
-# def sigmoid_cosine_distance_p(x, y, p=1.0, dim=-1, tau=1.0, eps=1e-8):
-#     sim = F.cosine_similarity(x, y, dim=dim, eps=eps)   # [-1, 1]
-#     d = 1.0 - torch.sigmoid(sim / tau)                  # ~[0,1] as tau→0
-#     return d.pow(p)
+        device = latent.device
+        pos_idx, pos_samples, neg_samples = self._sample_indices(pos_len, N, device)
 
-# def tanh_decay(M_0, N_epoch, x):
-#     return float(M_0 * (1.0 - np.tanh(2.0 * x / N_epoch)))  # ~M0→~0.036*M0
+        anchors   = latent[pos_idx]       # [pos_len, D]
+        positives = latent[pos_samples]   # [pos_len, D]
+        negatives = latent[neg_samples]   # [pos_len, D]
+        loss = F.triplet_margin_with_distance_loss(
+            anchors, positives, negatives,
+            distance_function=self._dist,
+            margin=self.margin,
+            swap=False,
+            reduction='mean'
+        )
 
-# def cosine_anneal(M_0, N_epoch, x):
-#     return float(0.5 * M_0 * (1.0 + np.cos(np.pi * x / N_epoch)))  # M0→0
+        if self.step_per_call:
+            self.step()
 
-# def no_decay(M_0, N_epoch, x):
-#     return float(M_0)
+        return loss
 
-# MARGIN_FN_DICT = {
-#     "tanh_decay": tanh_decay,
-#     "cosine_anneal": cosine_anneal,
-#     "no_decay": no_decay,
-# }
-
-# class MarginScheduledLossFunction:
-#     def __init__(self, M_0: float = 0.25, N_epoch: int = 50, N_restart: int = -1,
-#                  update_fn: str = "tanh_decay", p: float = 1.0, tau: float = 1.0, dim: int = -1):
-#         if update_fn not in MARGIN_FN_DICT:
-#             raise ValueError(f"Unknown update_fn: {update_fn}. Choose from {list(MARGIN_FN_DICT)}")
-#         if N_epoch <= 0:
-#             raise ValueError("N_epoch must be > 0")
-#         if N_restart == -1:
-#             N_restart = N_epoch
-#         if N_restart <= 0:
-#             raise ValueError("N_restart must be > 0")
-
-#         self.M_0 = float(M_0)
-#         self.N_epoch = int(N_epoch)
-#         self.N_restart = int(N_restart)
-#         self._step = 0
-
-#         # schedule
-#         self._update_margin_fn = partial(MARGIN_FN_DICT[update_fn], self.M_0, self.N_restart)
-#         self.M_curr = self._update_margin_fn(0)
-
-#         # distance params
-#         self._dist = partial(sigmoid_cosine_distance_p, p=p, dim=dim, tau=tau)
-
-#     @property
-#     def margin(self) -> float:
-#         return self.M_curr
-
-#     def step(self):
-#         # modulo-progress within the current cycle (includes x=0 and x=N_restart)
-#         self._step += 1
-#         x = self._step % self.N_restart
-#         self.M_curr = self._update_margin_fn(x)
-
-#     def reset(self):
-#         self._step = 0
-#         self.M_curr = self._update_margin_fn(0)
-
-#     def __call__(self, anchor, positive, negative):
-#         # functional variant so we can pass a dynamic margin
-#         return F.triplet_margin_with_distance_loss(
-#             anchor, positive, negative,
-#             distance_function=self._dist,
-#             margin=float(self.M_curr),
-#             swap=False,
-#             reduction='mean'
-#         )
 
 
 class BCELoss(_WeightedLoss):
@@ -213,10 +191,10 @@ class BCELoss(_WeightedLoss):
         weight: Optional[Tensor] = None,
         size_average=None,
         reduce=None,
-        reduction: str = "mean",
+        reduction: str = "mean"
     ) -> None:
         super().__init__(weight, size_average, reduce, reduction)
-
+        
     def forward(self, input: Tensor, target: Tensor) -> Tensor:
         return F.binary_cross_entropy(
             input, target, weight=self.weight, reduction=self.reduction
