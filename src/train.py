@@ -28,7 +28,7 @@ sys.path.append(os.path.expanduser('~/soderlinglab/user/pooja/projects/Biotin/sr
 
 # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=3)
 
-@hydra.main(version_base=None, config_path="configs", config_name="trainn")
+@hydra.main(version_base=None, config_path="configs", config_name="train")
 def main(cfg: DictConfig): # 
     cfg = OmegaConf.to_container(cfg, resolve = True)
     train_model(cfg)
@@ -42,12 +42,13 @@ def validate(cfg, val_loader, model, Loss1, Loss2, alpha):
     total_labels = []
     total_preds = []
     with torch.no_grad():
-        for batch in val_loader:
+        for i, batch in enumerate(val_loader):
             embed, labels, pos_len = batch
             embed = embed.to(DEVICE)
             labels = labels.to(DEVICE)
             pos_len = pos_len.to(DEVICE)
             embed, preds = model(embed)
+            print('embed dims', embed.size(), 'preds.shape', preds.size(), 'labels sh', labels.size())
             embed = embed.squeeze(0)
             preds = preds.squeeze(-1)
             total_labels.append(labels.flatten().cpu().clone())
@@ -55,12 +56,12 @@ def validate(cfg, val_loader, model, Loss1, Loss2, alpha):
             loss1 = Loss1(embed, pos_len)
             loss2 = Loss2(preds, labels) ## params
             # Backward pass
-#             l += (alpha*loss1 + (1-alpha)*loss2).item()
-            l += loss2
-    loss = l/len(val_loader)
-    total_labels = torch.cat(total_labels)
-    total_preds = torch.cat(total_preds)
-    acc, auroc, aupr, CM = compute(total_labels, total_preds, threshold=0.5)
+            l += (alpha*loss1 + (1-alpha)*loss2).item()
+#             l += loss2
+        loss = l/len(val_loader)
+        total_labels = torch.cat(total_labels)
+        total_preds = torch.cat(total_preds)
+        acc, auroc, aupr, CM = compute(total_labels, total_preds, threshold=0.5)
     return acc, auroc, aupr, CM, loss
 
 def load_data(cfg, cross='train'):
@@ -104,7 +105,7 @@ def train_model(cfg):
     ## seed
     torch.manual_seed(seed)
     np.random.seed(seed)
-    random.seed(seed)
+    random.seed(seed) #
 
     # start
     min_loss =float('inf')
@@ -113,7 +114,7 @@ def train_model(cfg):
         project=proj,
         job_type= job,
         name=NAME,
-        group=str(group),
+        group= str(group),
         config=cfg,
         )
     
@@ -129,49 +130,52 @@ def train_model(cfg):
         pnc = Counter()
         for batch_idx, batch in enumerate(train_loader):
             embed, labels, pos_len= batch # seq_embedding, biotin_pos
-            
+
             ## count pos and neg
             pnc.update(labels.view(-1).tolist())
-            
+            print(pnc)
+
             ## move to device
             embed = embed.to(DEVICE)
             labels = labels.to(DEVICE).float()
             pos_len = pos_len.to(DEVICE)
-            
+
             # run model for this sequence (batch size always 1)
             embed, preds = model(embed)
             embed = embed.squeeze(0) # remove batch dim for inutitive passing thru loss
-            preds = preds.squeeze(-1) ## match label dims
+            labels = labels.float().unsqueeze(-1)  # add columnar dimension to targets
+            print('embed dims', embed.size(), 'preds.shape', preds.size(), 'labels sh', labels.size())
 
             # Zero gradients
             optimizer.zero_grad(set_to_none=True)
-            
+
             # Calculate loss
             loss1 = Loss1(embed, pos_len)
             loss2 =  Loss2(preds, labels) ## params
-            
+
             ## alternate loss backprop w set alpha
-#             l = alpha*loss1 + (1-alpha)*loss2
-            l = loss2
+            l = alpha*loss1 + (1-alpha)*loss2
+#             l = loss2
             l.backward()
-    
+
             ## optimizer step
             optimizer.step()
             ## update margin
             Loss1.step()
-            
+
             ## flatten for metrics
             labels = labels.flatten().detach().cpu().clone()
+            print(np.unique(labels, return_counts=True))
             preds = preds.flatten().detach().cpu().clone()
-        
+
         ## validate
         v_acc, v_auroc, v_aupr, v_CM, v_loss = validate(cfg, val_loader, model, Loss1, Loss2, alpha)
-        
+
         ## log val metrics
         val_metrics = {"acc": float(v_acc), "loss": float(v_loss), 'auroc': float(v_auroc), 'aupr': float(v_aupr)}
         run.log(val_metrics)
         print(f'Epoch [{epoch+1}/{num_epochs}]; Val Loss: {v_loss:.4f}')
-        
+
         ## log best model
         if v_loss < min_loss and epoch > BURN_IN:
             safe_pnc = float(pnc) if hasattr(pnc, "__float__") else pnc
