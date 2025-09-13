@@ -1,0 +1,13 @@
+defaults:
+    - _self_
+    - data: train-val-test
+    - models: model5
+#     - override hydra/sweeper/sampler: nsgaii
+
+job_type: 'test'
+project: 'biotin-${hydra:runtime.choices.models}-Knegs'
+seed: 123
+RUN_ID: 'titydtsp'
+best_model: '/cwork/pkp14/Biotin/models/biotin-model5-Knegs/TMLfrqupd_BCEless/alternatEpoch5_025_95.pth'
+
+
