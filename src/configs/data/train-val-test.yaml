@@ -1,21 +1,41 @@
-dataloader:
-    _target_: torch.utils.data.DataLoader
-    batch_size: 1
-    shuffle: False
-    
 dataset:
-    _target_:  dataset.LysineDataset
-    ID_col: 'Accession'
-    biotin_locs_col: 'BiotinPosition'
-    seq_col: 'seq'
-    embeddings_path: '/cwork/pkp14/Biotin/esm2_15b_embeds'
-
-splits:
-    train:
+    binary:
+        _target_:  dataset.BinaryDataset
         file: /hpc/group/soderlinglab/user/pooja/projects/Biotin/data/train-val-test/train.csv
+        ID_col: 'Accession'
+        seq_col: 'seq'
+        positives_col: 'BiotinPosition'
+        embeddings_path: '/cwork/pkp14/Biotin/esm2_15b_embeds'
 
-    val:
-        file: /hpc/group/soderlinglab/user/pooja/projects/Biotin/data/train-val-test/val.csv
+    contrastive:
+        _target_:  dataset.ContrastiveDataset
+        p_ID_col: 'pos_ID'
+        a_ID_col: 'anchor_ID'
+        n_ID_col: 'neg_ID'
+        p_idx_col: 'pos_idx'
+        a_idx_col: 'anchor_idx'
+        n_idx_col: 'neg_idx'
+        seq_col: 'seq'
+        embeddings_path: '/cwork/pkp14/Biotin/esm2_15b_embeds'
+        file: /hpc/group/soderlinglab/user/pooja/projects/Biotin/data/train-val-test/training_pairs.csv
 
-    test:
-        file: /hpc/group/soderlinglab/user/pooja/projects/Biotin/data/train-val-test/test.csv
+train:  
+    dataloader:
+        _target_: torch.utils.data.DataLoader
+        batch_size: 1
+        _partial_: True
+        shuffle: False
+
+val:
+    dataloader:
+        _target_: torch.utils.data.DataLoader
+        batch_size: 1
+        shuffle: False
+        collate_fn: dataset.inference_cusfom_collate_fn
+        
+test:        
+    dataloader:
+        _target_: torch.utils.data.DataLoader
+        batch_size: 1
+        shuffle: False
+        collate_fn: dataset.inference_custom_collate_fn
