@@ -16,8 +16,8 @@ import hydra
 import random
 import sys
 sys.path.append(os.path.expanduser('~/soderlinglab/user/pooja/projects/Biotin/src'))
-from dataset import LysineDataset
-from metrics import compute  # whatever you need
+from dataset import TrainDataset, InferenceDataset
+from metrics import compute
 from collections import Counter
 import wandb
 import hydra
@@ -28,7 +28,7 @@ sys.path.append(os.path.expanduser('~/soderlinglab/user/pooja/projects/Biotin/sr
 
 # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=3)
 
-@hydra.main(version_base=None, config_path="configs", config_name="train")
+@hydra.main(version_base=None, config_path="configs", config_name="trainn")
 def main(cfg: DictConfig): # 
     cfg = OmegaConf.to_container(cfg, resolve = True)
     train_model(cfg)
@@ -48,7 +48,6 @@ def validate(cfg, val_loader, model, Loss1, Loss2, alpha):
             labels = labels.to(DEVICE)
             pos_len = pos_len.to(DEVICE)
             embed, preds = model(embed)
-            print('embed dims', embed.size(), 'preds.shape', preds.size(), 'labels sh', labels.size())
             embed = embed.squeeze(0)
             preds = preds.squeeze(-1)
             total_labels.append(labels.flatten().cpu().clone())
@@ -57,7 +56,6 @@ def validate(cfg, val_loader, model, Loss1, Loss2, alpha):
             loss2 = Loss2(preds, labels) ## params
             # Backward pass
             l += (alpha*loss1 + (1-alpha)*loss2).item()
-#             l += loss2
         loss = l/len(val_loader)
         total_labels = torch.cat(total_labels)
         total_preds = torch.cat(total_preds)
@@ -66,8 +64,9 @@ def validate(cfg, val_loader, model, Loss1, Loss2, alpha):
 
 def load_data(cfg, cross='train'):
     ## implement cross val
-    dataset_builder = hydra.utils.instantiate(cfg['data']['dataset'], _partial_=True)
-    dataset = dataset_builder(file=cfg['data']['splits'][cross]['file'])
+    contrastive_dataset_builder = hydra.utils.instantiate(cfg['data'][cross]['dataset'], _partial_=True)
+    binary_dataset_builder = hydra.utils.instantiate
+    dataset = contrastive_dataset_builder(file=cfg['data']['splits'][cross]['file'])
     dataloader_builder = hydra.utils.instantiate(cfg['data']['dataloader'], _partial_=True)
     dataloader = dataloader_builder(dataset)
     return dataloader
@@ -91,13 +90,11 @@ def train_model(cfg):
     learning_rate = cfg['lr']
     job = cfg['job_type']
     
-    # Nice run name + group
-    l1n = str(cfg['loss1_weight']).replace('.', '')
-    l2n = str(1 - cfg['loss1_weight']).replace('.', '')
+    #  run name + group
     m   = str(cfg['anneal_fn']['M_0']).replace('.', '')
     time = datetime.now().strftime("%m_%d-%H_%M")
     nae = cfg['n_alternate_epoch']
-    NAME = f"alternatEpoch{nae}_{m}" if alternate_epochs else f"not"
+    NAME = f"alternatEpoch{nae}_{m}" if alternate_epochs else f"bce"
     group = cfg["wandb"]["group"]  
     proj = cfg['project']
     seed = cfg['seed']
@@ -109,6 +106,7 @@ def train_model(cfg):
 
     # start
     min_loss =float('inf')
+    max_auroc = float('-inf')
     run = wandb.init(
         entity="soderlinglab-dukecellbio",
         project=proj,
@@ -117,23 +115,24 @@ def train_model(cfg):
         group= str(group),
         config=cfg,
         )
-    
+    alpha_updates = {0: 'BCE',
+                    1: "TML"}
     model.to(DEVICE)
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
     for epoch in range(num_epochs):
         model.train()
         epoch_loss = 0.0
         if alternate_epochs:
-            alpha = 1 if (epoch %nae ==0) else 0 ## update bce every 5 epochs
+            # alpha*loss1 + (1-alpha)*loss2
+            alpha = 1 if (epoch %nae ==0) else 0 ## loss1 gets freq updated
         else:
-            alpha = cfg['loss1_weight']
+            alpha = 0
         pnc = Counter()
         for batch_idx, batch in enumerate(train_loader):
-            embed, labels, pos_len= batch # seq_embedding, biotin_pos
+            embed, labels= batch # seq_embedding, biotin_pos
 
             ## count pos and neg
             pnc.update(labels.view(-1).tolist())
-            print(pnc)
 
             ## move to device
             embed = embed.to(DEVICE)
@@ -144,7 +143,6 @@ def train_model(cfg):
             embed, preds = model(embed)
             embed = embed.squeeze(0) # remove batch dim for inutitive passing thru loss
             labels = labels.float().unsqueeze(-1)  # add columnar dimension to targets
-            print('embed dims', embed.size(), 'preds.shape', preds.size(), 'labels sh', labels.size())
 
             # Zero gradients
             optimizer.zero_grad(set_to_none=True)
@@ -165,7 +163,6 @@ def train_model(cfg):
 
             ## flatten for metrics
             labels = labels.flatten().detach().cpu().clone()
-            print(np.unique(labels, return_counts=True))
             preds = preds.flatten().detach().cpu().clone()
 
         ## validate
@@ -174,27 +171,38 @@ def train_model(cfg):
         ## log val metrics
         val_metrics = {"acc": float(v_acc), "loss": float(v_loss), 'auroc': float(v_auroc), 'aupr': float(v_aupr)}
         run.log(val_metrics)
-        print(f'Epoch [{epoch+1}/{num_epochs}]; Val Loss: {v_loss:.4f}')
-
+        print(f'Epoch [{epoch+1}/{num_epochs}]; Val Loss: {v_loss:.4f}, updating {alpha_updates[alpha]}')
+        
         ## log best model
-        if v_loss < min_loss and epoch > BURN_IN:
+        if (v_loss < min_loss or v_auroc > max_auroc) and epoch > BURN_IN:
             safe_pnc = float(pnc) if hasattr(pnc, "__float__") else pnc
             val_metrics.update({'epoch' : epoch, 'pnc': safe_pnc})
+            save_path = Path(f'/cwork/pkp14/Biotin/models/{proj}/{str(group)}/{NAME}_{epoch}.pth')
+            save_path.parent.mkdir(exist_ok=True, parents=True)   # create parent folder(s) if missing
+            opt_path = save_path.with_name(save_path.stem + "_opt.pth")
             extra_data = {'embedding': tuple(embed.shape), 'preds': tuple(preds.shape),
                          'preds_min': preds.min().item(),
-                         'preds_max': preds.max().item(), 'margin': float(Loss1.margin)
+                         'preds_max': preds.max().item(), 'margin': float(Loss1.margin),
+                          'epoch': epoch, 'last_loss_update': alpha_updates[alpha],
+                          'model_path': str(save_path)
                          }
-            art = wandb.Artifact(name=f"{NAME}-eval", type="eval", metadata=extra_data)
+            art = wandb.Artifact(name=f"{NAME}_{epoch}", type="eval", metadata=extra_data)
             with art.new_file("val_metrics.json", mode="w") as f:
                 json.dump(val_metrics
                           , f, indent=2)
             with art.new_file("extra_data.json", mode="w") as f:
                 json.dump(extra_data, f, indent=2)
-            run.log_artifact(art, aliases=["best"])
-            torch.save(model.state_dict(), f'/cwork/pkp14/Biotin/models/{NAME}.pth')
-            print(f"New best model @ epoch {epoch} saved with loss: {v_loss:.4f}")
-            min_loss = v_loss
 
+            alldata = val_metrics | extra_data
+            with open(save_path.parent / f'{save_path.stem}.json', mode='w') as f:
+                json.dump(alldata, f, indent=4)
+            run.log_artifact(art, aliases=["best"])
+            torch.save(model.state_dict(),save_path)
+            torch.save(optimizer.state_dict(), opt_path)
+            print(f"New best model @ epoch {epoch} saved with loss: {v_loss:.4f}, last loss update {alpha_updates[alpha]},"
+                  f"max_auroc: {max_auroc}")
+            min_loss = v_loss
+            max_auroc = v_auroc
     run.finish()
     return
 

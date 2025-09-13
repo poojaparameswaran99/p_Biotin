@@ -37,8 +37,57 @@ MARGIN_FN_DICT = {
     "no_decay": no_decay,
 }
 
-
 class MarginScheduledTripletLossFunction():
+    def __init__(self, distance_fn, anneal_fn, N_restart: int =10, seed=123, step_per_call=False):
+        ## could change into sigmoid_cosine_distance_p
+        self._dist = distance_fn        
+        self._anneal = anneal_fn  
+        self.N_restart = int(N_restart)
+        self._step = 0
+        self.step_per_call = bool(step_per_call)
+        self.M_curr = float(self._anneal(x=0))
+        self.seed = seed
+    
+    ## only referenced upon call on local script
+    @property
+    def margin(self) -> float:
+        return float(self.M_curr)
+
+    def step(self):
+        self._step += 1
+        x = self._step % self.N_restart
+        self.M_curr = float(self._anneal(x=x)) ## update margin fn
+
+    def reset(self):
+        self._step = 0
+        self.M_curr = self._anneal(x=0) ## update_margin_fn
+
+
+    def __call__(self, embedding: torch.Tensor):
+        n_embedding = embedding.size()
+        positives = [embedding.select(0, i) for i in n_embedding if i%3 ==0]
+        anchors = [embedding.select(0, i) for i in n_embedding if i%3 ==1]
+        
+        ## test in console...
+        positives = embedding.index_select(0, torch.tensor(n_embedding[0::3]))
+        anchors   = embedding.index_select(0, torch.tensor(n_embedding[1::3]))
+        negatives = embedding.index_select(0, torch.tensor(n_embedding[2::3]))
+        positives = embedding[:,  0, :]
+        anchors   = embedding[:, 1, :]
+        negatives = embedding[:,2,:]
+        loss = F.triplet_margin_with_distance_loss(
+            anchors, positives, negatives,
+            distance_function=self._dist,
+            margin=self.margin,
+            swap=False,
+            reduction='mean'
+        )
+
+        if self.step_per_call:
+            self.step()        
+        return loss
+
+class oldMarginScheduledTripletLossFunction():
     def __init__(self, distance_fn, anneal_fn, N_restart: int =10, seed=123, step_per_call=False):
         ## could change into sigmoid_cosine_distance_p
         self._dist = distance_fn        
@@ -67,17 +116,15 @@ class MarginScheduledTripletLossFunction():
     def _sample_indices(self, N_pos, N_total, device):
         # anchors: all positives [0..N_pos-1]
         pos_idx = torch.arange(N_pos, device=device)
-        print(pos_idx)
         neg_idx = torch.arange(N_pos, N_total, device=device)
 
         if neg_idx.numel() == 0:
             raise ValueError("No negatives available: N_total must be > N_pos.")
+            
         # pos could be self
         pos_perm = torch.randperm(N_pos, device=device)
         pos_samples = pos_idx[pos_perm]
-        neg_samples = neg_idx[torch.randperm(len(neg_idx), device=device)[:N_pos+1]]
-        print('in loss, pos samples len: ', len(pos_samples))
-        print('in loss, neg samples len: ', len(neg_samples))
+        neg_samples = neg_idx[torch.randint(0, neg_idx.numel(), (pos_idx.numel(),), device=device) ]
         
         return pos_idx, pos_samples, neg_samples
 
