@@ -16,7 +16,7 @@ import hydra
 import random
 import sys
 sys.path.append(os.path.expanduser('~/soderlinglab/user/pooja/projects/Biotin/src'))
-from dataset import TrainDataset, InferenceDataset
+from dataset import BinaryDataset, ContrastiveDataset
 from metrics import compute
 from collections import Counter
 import wandb
@@ -63,20 +63,41 @@ def validate(cfg, val_loader, model, Loss1, Loss2, alpha):
     return acc, auroc, aupr, CM, loss
 
 def load_data(cfg, cross='train'):
-    ## implement cross val
-    contrastive_dataset_builder = hydra.utils.instantiate(cfg['data'][cross]['dataset'], _partial_=True)
-    binary_dataset_builder = hydra.utils.instantiate
-    dataset = contrastive_dataset_builder(file=cfg['data']['splits'][cross]['file'])
-    dataloader_builder = hydra.utils.instantiate(cfg['data']['dataloader'], _partial_=True)
-    dataloader = dataloader_builder(dataset)
-    return dataloader
+    ## binary
+    binary_builder = hydra.utils.instantiate(cfg['data']['binary']['dataset'])
+    binary_dataset = binary_builder(file=cfg['data']['binary_dataset_files'][cross]['file'])
+    binary_loader = hydra.utils.instantiate(cfg['data']['binary']['dataloader'], dataset=binary_dataset)
+    
+    # contrastive
+    contrastive_dataset = hydra.utils.instantiate(cfg['data']['contrastive']['dataset'])
+    contrastive_loader =  hydra.utils.instantiate(cfg['data']['contrastive']['dataloader'],dataset=contrastive_dataset)
+    
+    return binary_loader, contrastive_loader
+
+def run_binary_loader(binary_loader, model, bceloss, n_epoch):
+    pnc = Counter()
+    for bidx, batch in enumerate(binary_loader):
+        embed, labels = batch
+        pnc.update(labels.view(-1).tolist())
+
+    
+    return
 
 def train_model(cfg):
     ## data
-    train_loader = load_data(cfg, 'train')
-    val_loader = load_data(cfg, cross='val')
+    train_binary_dataloader, train_contrastive_dataloader= load_data(cfg, 'train')
+#     for bidx, batch in enumerate(train_binary_dataloader):
+#         if bidx == 0:
+#             embed, labels = batch
+#             print('binary embed', embed.size(), 'labels', labels.size())
+#     print('done binary')
+#     for cidx, catch in enumerate(train_contrastive_dataloader):
+#         if cidx == 0:
+#             embed = catch
+#             print('contrastive embed', embed.size())
+
+    val_binary_dataloader, _ = load_data(cfg, cross='validation')
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
-    print('training on DEVICE', DEVICE)
     
     ## instantiate
     Loss1 = hydra.utils.instantiate(cfg['Loss1']) ## triplet margin distance loss
@@ -124,13 +145,12 @@ def train_model(cfg):
         epoch_loss = 0.0
         if alternate_epochs:
             # alpha*loss1 + (1-alpha)*loss2
-            alpha = 1 if (epoch %nae ==0) else 0 ## loss1 gets freq updated
+            alpha = 1 if (epoch %nae ==0) else 0 ## loss1 gets freq update=
         else:
             alpha = 0
         pnc = Counter()
-        for batch_idx, batch in enumerate(train_loader):
-            embed, labels= batch # seq_embedding, biotin_pos
-
+        for batch_idx, batch in enumerate(train_contrastive_loader):
+            embed= batch # seq_embedding, biotin_pos
             ## count pos and neg
             pnc.update(labels.view(-1).tolist())
 
@@ -153,7 +173,6 @@ def train_model(cfg):
 
             ## alternate loss backprop w set alpha
             l = alpha*loss1 + (1-alpha)*loss2
-#             l = loss2
             l.backward()
 
             ## optimizer step
@@ -206,6 +225,38 @@ def train_model(cfg):
     run.finish()
     return
 
+def save_best_model(model, optimizer, loss_used, val_preds, val_labels, val_loss, min_loss, val_auroc, max_auroc, posnegcounter, n_epoch, BURN_IN, PROJECT, GROUP, NAME):
+    ## log best model
+    if (v_loss < min_loss or v_auroc > max_auroc) and epoch > BURN_IN:
+        safe_pnc = float(pnc) if hasattr(pnc, "__float__") else pnc
+        val_metrics.update({'epoch' : epoch, 'pnc': safe_pnc})
+        save_path = Path(f'/cwork/pkp14/Biotin/models/{proj}/{str(group)}/{NAME}_{epoch}.pth')
+        save_path.parent.mkdir(exist_ok=True, parents=True)   # create parent folder(s) if missing
+        opt_path = save_path.with_name(save_path.stem + "_opt.pth")
+        extra_data = {'embedding': tuple(embed.shape), 'preds': tuple(preds.shape),
+                     'preds_min': preds.min().item(),
+                     'preds_max': preds.max().item(), 'margin': float(Loss1.margin),
+                      'epoch': epoch, 'last_loss_update': alpha_updates[alpha],
+                      'model_path': str(save_path)
+                     }
+        art = wandb.Artifact(name=f"{NAME}_{epoch}", type="eval", metadata=extra_data)
+        with art.new_file("val_metrics.json", mode="w") as f:
+            json.dump(val_metrics
+                      , f, indent=2)
+        with art.new_file("extra_data.json", mode="w") as f:
+            json.dump(extra_data, f, indent=2)
+
+        alldata = val_metrics | extra_data
+        with open(save_path.parent / f'{save_path.stem}.json', mode='w') as f:
+            json.dump(alldata, f, indent=4)
+        run.log_artifact(art, aliases=["best"])
+        torch.save(model.state_dict(),save_path)
+        torch.save(optimizer.state_dict(), opt_path)
+        print(f"New best model @ epoch {epoch} saved with loss: {v_loss:.4f}, last loss update {alpha_updates[alpha]},"
+              f"max_auroc: {max_auroc}")
+        min_loss = v_loss
+        max_auroc = v_auroc
+    return
 
 if __name__ == "__main__":
     main()
