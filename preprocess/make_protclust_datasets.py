@@ -1,37 +1,64 @@
-import pandas as pd
+import pandas as pd 
 import numpy as np 
 import os 
 import sys
-import os, sys
+import ast
+import re
+import matplotlib.pyplot as plt
 sys.path.insert(0, os.path.expanduser('~/soderlinglab/tools/protclust'))
 from protclust import clean, cluster, split, set_verbosity, milp_split
+from make_train_pairs import parse
 
 SEED=123
 def main():
     np.random.seed(123)
     file = '~/soderlinglab/user/pooja/projects/Biotin/data/Protein_w_BiotinSites.csv'
-    train_df, val_df, test_df = localcluster(file)
+    localcluster_and_write_datasets(file)
     return
 
-def localcluster(file):
+def localcluster_and_write_datasets(file):
     set_verbosity(verbose=True)
+    
+    ## read in data
     df = pd.read_csv(file)
+    
+    ## clean data w protclust clean
     dfc = clean(df, sequence_col='seq')
+    
+    ## cluster df
     clustered_df = cluster(dfc, sequence_col='seq', id_col='Accession')
     clustered_df.to_csv('tmp_data/cluster_check.csv', index=False)
+    
+    ## train , test split, independent var=nBiotins
     train_df, test_df = milp_split(clustered_df, group_col='cluster_representative', test_size=0.28, 
                                   balance_cols='nBiotinLocs')
+    ## train, val split, indepednent var = nBiotins
     train_df, val_df = milp_split(train_df, group_col='cluster_representative', test_size=0.15, 
                                   balance_cols='nBiotinLocs')
+    
+    ## chck train, val, test splits
     tmp_df = pd.concat([train_df, val_df, test_df], axis=0)
     tmp_df.to_csv('tmp_data/cluster_check.csv', index=False)
+    
+    # move the singular biotin points out of train
     train_df, val_df,test_df = divvy_oneBiotinylation(train_df, val_df, test_df)
-    return write_out(train_df, 'train'), write_out(val_df, 'val'), write_out(test_df, 'test')
+    
+    ## write out
+    for df, split in zip([train_df, val_df, test_df], ('train', 'val', 'test')):
+        write_out(df, split)
+    train_file = f'~/soderlinglab/user/pooja/projects/Biotin/data/train-val-test/train.csv'
+    
+    ## make contrastive training pairs
+
+    parse(train_file, 'Accession','seq', 'BiotinPosition')
+    print('training pairs made')
+    return
 
 def divvy_oneBiotinylation(train_df, val_df, test_df,test_out_percent=0.6, val_out_percent=0.4):
     inference_df = pd.concat([val_df, test_df], axis=0)
     ### samples with only one biotin in train
     train1Biotin_Index= sorted(train_df.query('nBiotinSites == 1').index)
+    print(f'length of 1 biotin points in train')
     ## move 1 biotin samples from train to test
     inference_df = pd.concat([inference_df, train_df.loc[train1Biotin_Index]], axis=0)
     ## drop 1 biotin samples from train
@@ -51,10 +78,12 @@ def divvy_oneBiotinylation(train_df, val_df, test_df,test_out_percent=0.6, val_o
     test_df = inference_df.sample(round(ntestout), random_state=123)
     val_df = inference_df.drop(test_df.index)
     data_checks(train_df, val_df, test_df)
+    print('data checks done')
     return train_df, val_df, test_df
 
 def write_out(df, split):
-    df.to_csv(f'../data/train-val-test/{split}.csv', index=False)
+    df.to_csv(f'~/soderlinglab/user/pooja/projects/Biotin/data/train-val-test/{split}.csv', index=False)
+    print(f'{split} written')
     return df
 
 def cluster_diversity(train_df, val_df, test_df):
@@ -64,10 +93,13 @@ def cluster_diversity(train_df, val_df, test_df):
     val_n_clusters = val_df['cluster_representative'].nunique()
     print('### train ####')
     print(f'clusters: {train_n_clusters}, nproteins: {train_df["Accession"].nunique()}')
+    print(f'Cluster diversity: {train_df.groupby("cluster_representative")["Accession"].nunique().value_counts()}')
     print('### val #####')
     print(f'clusters: {val_n_clusters}, nproteins: {val_df["Accession"].nunique()}')
+    print(f'Cluster diversity: {val_df.groupby("cluster_representative")["Accession"].nunique().value_counts()}')
     print('#### test #####')
     print(f'clusters: {test_n_clusters}, nproteins: {test_df["Accession"].nunique()}')
+    print(f'Cluster diversity: {test_df.groupby("cluster_representative")["Accession"].nunique().value_counts()}')
     return
 
 def plot_data(train_df, val_df, test_df):
