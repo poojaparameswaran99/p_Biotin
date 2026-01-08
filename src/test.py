@@ -12,7 +12,6 @@ import os
 import torch.nn as nn
 import hydra 
 import sys 
-from dataset import LysineDataset
 from metrics import compute
 from collections import Counter
 import wandb
@@ -31,83 +30,74 @@ def main(cfg: DictConfig):
     test(cfg)
     return
 
-
+@torch.no_grad()
 def test(cfg):
     ## load data
     test_loader = load_data(cfg, 'test')
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
-    print('training on DEVICE', DEVICE)
-    saved_model_path = cfg['best_model']
+    
+    saved_model_folder = cfg['best_model']
+    saved_model_path = Path(saved_model_folder) / 'best_model.pth'
     model = hydra.utils.instantiate(cfg['models']['esm2_15b'])
     model_state = torch.load(saved_model_path, weights_only=True)
     model.load_state_dict(model_state)
     model.to(DEVICE)
     model.eval()
     pnc = Counter()
-    total_labels = []
-    total_preds = []
-
-    PROJECT = cfg.get('project', 'default-project')
+    test_binary_dataloader, _ = load_data(cfg, cross='test')
+    PROJECT = cfg.get('project', str(saved_model_path).replace('/', '_'))
     GROUP = Path(saved_model_path).parent.stem
-    RUN_ID = cfg.get('wandb_run_id', None)  # or set to your known id like "moidmqea"
-    NAME = Path(saved_model_path).stem
-    run = wandb.init(
+    RUN_ID = cfg.get('wandb_run_id', str(saved_model_path).replace('/', '_'))  # or set to your known id like "moidmqea"
+    NAME = Path(saved_model_path).parent.stem
+    RUN = wandb.init(
         entity="soderlinglab-dukecellbio",
         project=PROJECT,
         id=RUN_ID,           # None => new run; or set to your known id to resume
-        resume="must" if RUN_ID else None,
         job_type="testing",
-        name= Path(saved_model_path).stem if RUN_ID else None,
+        name= Path(saved_model_path).parent.stem if RUN_ID else None,
         group=GROUP,
         config=cfg
     )
+    labels = []
+    preds = []
 
-    with torch.no_grad():
-        for i, batch in enumerate(test_loader):
-            embed, labels, pos_len = batch
-            embed = embed.to(DEVICE)
-            labels = labels.to(DEVICE)
-            pos_len = pos_len.to(DEVICE)
+    for i, batch in enumerate(test_binary_dataloader):
+        e, l = batch
+        e, l = e.to(DEVICE), l.to(DEVICE, dtype=torch.float32)
+        pnc.update(l.tolist())
+        _ , p = model(e)
+        p = torch.sigmoid(p)
+        labels.append(l.flatten().cpu().clone())
+        preds.append(p.flatten().cpu().clone())
             
-            pnc.update(labels.view(-1).tolist())
-            
-            embed, preds = model(embed)
-            embed = embed.squeeze(0)
-            preds = preds.squeeze(-1)
-            
-            total_labels.append(labels.flatten().cpu().clone())
-            total_preds.append(preds.flatten().cpu().clone())
-            
-    total_labels = torch.cat(total_labels)
-    total_preds = torch.cat(total_preds)
-
+    labels = torch.cat(labels, dim=0).cpu()
+    preds  = torch.cat(preds,  dim=0).cpu()
+    df = pd.DataFrame({'labels': labels.numpy(), 'preds':preds.numpy()})
+    safe_pnc = dict(pnc) if hasattr(pnc, "items") else (float(pnc) if hasattr(pnc, "__float__") else pnc)
+    
     ## get test metrics
-    acc, auroc, aupr, CM = compute(total_labels, total_preds, threshold=0.5)
-    test_metrics = {'acc': float(acc), 'auroc':float(auroc), 'aupr': float(aupr), 'CM': np.asarray(CM).tolist()}
-
-    safe_pnc = float(pnc) if hasattr(pnc, "__float__") else pnc
-    test_metrics.update({'model_name': saved_model_path,'pnc': safe_pnc})
-
-    # Log scalars
-    wandb.log({
-        "test/acc": test_metrics["acc"],
-        "test/auroc": test_metrics["auroc"],
-        "test/aupr": test_metrics["aupr"]
-    })
-
-    # Save & log as artifact
-    out_dir = Path(f'/cwork/pkp14/Biotin/models/{GROUP}')
-    out_dir.mkdir(parents=True, exist_ok=True)
-    save_path = out_dir / f'{NAME}_test-results.json'
-    with open(save_path, 'w') as f:
-        json.dump(test_metrics, f, indent=2)
-
-    art = wandb.Artifact(name=f"{NAME}_{GROUP}_test", type="eval", metadata=test_metrics)
-    art.add_file(str(save_path))
-    run.log_artifact(art, aliases=["test_results"])
-
-    run.finish()
-    return acc, auroc, aupr, CM
+    acc, auroc, aupr, CM = compute(labels, preds, threshold=0.5)
+    test_metrics = {'model_path': NAME,
+                    'test_accuracy': float(acc),
+                   'test_auroc': float(auroc),
+                   'test_aupr': float(aupr), ## cm
+                   'pnc': safe_pnc}
+    save_test_path = Path(f'/cwork/pkp14/Biotin/models/{PROJECT}/{NAME}')
+    save_test_path.mkdir(exist_ok=True, parents=True)
+    with open(save_test_path / 'test_metrics.json', mode='w') as f:
+        json.dump(test_metrics, f ,indent=4)
+    df.to_csv(save_test_path / 'test_preds.csv', index=False)
+    
+    print(f'test metrics written to {save_test_path}')
+    art = wandb.Artifact(name=f"{NAME}_eval", type="eval", metadata=test_metrics)
+    art.add_file(str(save_test_path / 'test_metrics.json'))
+    art.add_file(str(save_test_path / 'test_preds.csv'))
+    wandb.log_artifact(art)
+    logged = RUN.log_artifact(art)
+    logged.wait()                 # ensure artifact upload completes
+    print("Run URL:", RUN.url)    # sa
+    wandb.finish()                # flush everything
+    return
 
 if __name__ == '__main__':
     main()
