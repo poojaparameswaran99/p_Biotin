@@ -13,7 +13,7 @@ import torch
 import subprocess
 from itertools import chain
 sys.path.append(os.path.expanduser('~/soderlinglab/run_utils/src'))
-# from src_embeddings import parse_seqs
+from src_embeddings import parse_seqs
 
 ## things to do 
 # update dataset configs
@@ -21,18 +21,20 @@ sys.path.append(os.path.expanduser('~/soderlinglab/run_utils/src'))
 # run on subset of data
 
 class BinaryDataset(Dataset):
-    def __init__(self, file, ID_col, seq_col, positives_col, embeddings_path):
+    def __init__(self, file, ID_col, seq_col, positives_col, embeddings_path, esm_engine):
         self.df = pd.read_csv(file)
         self.df[positives_col] = self.df[positives_col].apply(eval)
         self.ID_col = ID_col
         self.seq_col = seq_col
         self.positives_col = positives_col
         self.embeddings_path= embeddings_path
+        self.esm_engine = esm_engine
+        
         
     def _pull_embedding(self, seq_id, seq):
         file_path = Path(self.embeddings_path) / f"{seq_id}.h5"
-#         if not file_path.exists():
-#             self._get_esm_embedding()
+        if not file_path.exists():
+            self.embedding_engine.make_embedding()
         with h5py.File(Path(self.embeddings_path) / f'{seq_id}.h5', 'r') as f:  # Added 'r' mode
             embdg = torch.tensor(f[f'{seq_id}_representation'][:])
         assert len(seq) == len(embdg)
@@ -69,7 +71,7 @@ def inference_custom_collate_fn(batch):
 
 
 class ContrastiveDataset(Dataset):
-    def __init__(self, file, p_ID_col, a_ID_col, n_ID_col, p_idx_col, a_idx_col, n_idx_col, seq_col, embeddings_path):
+    def __init__(self, file, p_ID_col, a_ID_col, n_ID_col, p_idx_col, a_idx_col, n_idx_col, seq_col, embeddings_path, esm_engine):
         self.df = pd.read_csv(file)
         self.df = self.df.drop(columns=list(filter(lambda x: x.startswith('Unnamed'), self.df.columns)))
         self.p_ID_col = p_ID_col
@@ -114,4 +116,27 @@ class ContrastiveDataset(Dataset):
             embdg = torch.tensor(f[f'{seq_id}_representation'][:])
         assert len(seq) == len(embdg)
         return embdg
+    
+
+class ESMembedding:
+    def __init__(self, file, IDcol, seqcol,
+                 esm='esm2_15b', average_pool=False,
+                 seqtype='Protein', project_name='Biotin',
+                 overwrite=False):
+        cfg = {'esm': esm,
+              'seqfile': file,
+               'IDcol': IDcol,
+               'seqcol': seqcol,
+               'average_pool': average_pool,
+               'seqtype': seqtype,
+               'project_name': project_name,
+               'overwrite': overwrite,
+               'output_dir': f'/cwork/pkp14/{project_name}/{esm}_embeds'
+              }
+        
+        self.cfg = cfg
+        
+    def make_embedding(self):
+        parse_seqs(self.cfg)
+        return
     
