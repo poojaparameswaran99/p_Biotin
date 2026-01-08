@@ -28,235 +28,258 @@ sys.path.append(os.path.expanduser('~/soderlinglab/user/pooja/projects/Biotin/sr
 
 # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=3)
 
-@hydra.main(version_base=None, config_path="configs", config_name="trainn")
-def main(cfg: DictConfig): # 
+@hydra.main(version_base=None, config_path="configs", config_name="train")
+def main(cfg: DictConfig): 
+    ## parse hydra config to dictionary
     cfg = OmegaConf.to_container(cfg, resolve = True)
+    
+    ## train model
     train_model(cfg)
     return
 
-
-def validate(cfg, val_loader, model, Loss1, Loss2, alpha):
-    DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
-    l = 0
+@torch.no_grad()
+def validate(val_loader, model, optimizer, bcelogits_loss, loss_used, min_loss, max_auroc,
+             epoch, PROJECT, GROUP, NAME, RUN, BURN_IN, DEVICE):
+    ## initialize
+    v_loss = 0
+    
+    ## model in eval mode
     model.eval()
-    total_labels = []
-    total_preds = []
-    with torch.no_grad():
-        for i, batch in enumerate(val_loader):
-            embed, labels, pos_len = batch
-            embed = embed.to(DEVICE)
-            labels = labels.to(DEVICE)
-            pos_len = pos_len.to(DEVICE)
-            embed, preds = model(embed)
-            embed = embed.squeeze(0)
-            preds = preds.squeeze(-1)
-            total_labels.append(labels.flatten().cpu().clone())
-            total_preds.append(preds.flatten().cpu().clone())
-            loss1 = Loss1(embed, pos_len)
-            loss2 = Loss2(preds, labels) ## params
-            # Backward pass
-            l += (alpha*loss1 + (1-alpha)*loss2).item()
-        loss = l/len(val_loader)
-        total_labels = torch.cat(total_labels)
-        total_preds = torch.cat(total_preds)
-        acc, auroc, aupr, CM = compute(total_labels, total_preds, threshold=0.5)
-    return acc, auroc, aupr, CM, loss
+    labels = []
+    preds = []
+    pnc = Counter()
+    for i, batch in enumerate(val_loader):
+        e, l = batch
+        e, l= e.to(DEVICE), l.to(DEVICE, dtype=torch.float32)
+        pnc.update(l.tolist())
+        _, p_logits = model(e)
+        v_loss += bcelogits_loss(p_logits, l).item()
+        p = torch.sigmoid(p_logits)
+        labels.append(l.flatten().cpu().clone())
+        preds.append(p.flatten().cpu().clone())
+    v_loss = v_loss / len(labels)
+    ## is it necessary to torch cat labels and preds
+    ## convert preds to logits 
+    preds  = torch.cat(preds,  dim=0).cpu()
+    labels = torch.cat(labels, dim=0).cpu()
+    acc, auroc, aupr, CM, recall, precision, barplot, heatmap = compute(labels, preds, threshold=0.5)
+    ## log val metrics
+    val_metrics = {"Validation/Accuracy": float(acc),
+                   "Validation/Loss": float(v_loss), 
+                   'Validation/AUROC': float(auroc), 
+                   'Validation/AUPR': float(aupr), 
+                   'Validation/Precision': float(precision),
+                   'Validation/Recall': float(recall),
+                    'epoch': epoch}
+    RUN.log(val_metrics, step=epoch, commit=True)
+    
+    min_loss, max_auroc = save_best_model(model, optimizer, v_loss, min_loss, auroc,
+                                          max_auroc, epoch, BURN_IN, PROJECT, GROUP,
+                                          NAME, run=RUN, loss_used=loss_used, pnc=pnc)
+    return min_loss, max_auroc
 
 def load_data(cfg, cross='train'):
+    esm_engine = hydra.utils.instantiate(cfg.embedding)
     ## binary
     binary_builder = hydra.utils.instantiate(cfg['data']['binary']['dataset'])
-    binary_dataset = binary_builder(file=cfg['data']['binary_dataset_files'][cross]['file'])
-    binary_loader = hydra.utils.instantiate(cfg['data']['binary']['dataloader'], dataset=binary_dataset)
-    
+    binary_dataset = binary_builder(file=cfg['data']['binary_dataset_files'][cross]['file'],
+                                   esm_engine=esm_engine)
+    binary_loader = hydra.utils.instantiate(cfg['data']['binary']['dataloader'],
+                                            dataset=binary_dataset)
     # contrastive
     contrastive_dataset = hydra.utils.instantiate(cfg['data']['contrastive']['dataset'])
-    contrastive_loader =  hydra.utils.instantiate(cfg['data']['contrastive']['dataloader'],dataset=contrastive_dataset)
-    
+    contrastive_loader =  hydra.utils.instantiate(cfg['data']['contrastive']
+                                                  ['dataloader'], dataset=contrastive_dataset)
     return binary_loader, contrastive_loader
 
-def run_binary_loader(binary_loader, model, bceloss, n_epoch):
+def run_train_binary_loader(binary_loader, val_loader, model, 
+                            optimizer, bcelogits_loss, min_loss, 
+                            max_auroc, n_epoch, PROJECT, GROUP, NAME, BURN_IN, RUN, DEVICE):
     pnc = Counter()
+    model.train()
+    labels = []
+    preds = []
+    e_loss = 0
     for bidx, batch in enumerate(binary_loader):
-        embed, labels = batch
-        pnc.update(labels.view(-1).tolist())
-
+        optimizer.zero_grad() ## prevent accumulation across training steps
+        e, l = batch
+        e, l = e.to(DEVICE), l.to(DEVICE, dtype=torch.float32)
+        pnc.update(l.view(-1).tolist())
+        _, p = model(e)
+        loss = bcelogits_loss(p, l)
+        loss.backward()
+        optimizer.step()
+        labels.append(l.flatten().detach().cpu().clone())
+        preds.append(p.flatten().detach().cpu().clone())
+        e_loss += loss.item()
+    e_loss = e_loss / len(labels)
+    pnc = float(pnc) if hasattr(pnc, "__float__") else pnc
+    labels = torch.cat(labels, dim=0).cpu()
+    preds  = torch.cat(preds,  dim=0).cpu()
     
-    return
+    acc, auroc, aupr, CM, recall, precision, barplot, heatmap = compute(labels, preds, threshold=0.5)
+    RUN.log({'Train/Loss': e_loss, 
+             'epoch': n_epoch,
+             'Train/Accuracy': acc,
+             'Train/AUROC': auroc, 
+             'Train/AUPR': aupr,
+            'Train/Recall': recall,
+             'Train/Precision': precision},
+            step=n_epoch)
+    
+    min_loss, max_auroc = validate(val_loader, model, optimizer,
+                                   bcelogits_loss, 'BCElogits', min_loss, 
+                                   max_auroc, n_epoch, PROJECT, GROUP, NAME, RUN, BURN_IN, DEVICE)
+    
+    return model, optimizer, min_loss, max_auroc
+
+def run_train_contrastive_loader(contrastive_loader, val_loader, model, 
+                                 optimizer, contrastive_loss, bcelogits_loss, 
+                                 min_loss, max_auroc, n_epoch, PROJECT, 
+                                 GROUP, NAME, BURN_IN, RUN, DEVICE):
+    model.train()
+    labels = []
+    preds = []
+    e_loss = 0
+    for bidx, batch in enumerate(contrastive_loader):
+        optimizer.zero_grad() ## prevent accumulation across training steps
+        e = batch
+        e = e.to(DEVICE)
+        o, _ = model(e) 
+        loss = contrastive_loss(o)
+        loss.backward()
+        optimizer.step()
+        contrastive_loss.step()
+        e_loss += loss.item()
+
+    RUN.log({'Train/Loss': e_loss, 'epoch': n_epoch}, step=n_epoch)
+    min_loss, max_auroc = validate(val_loader, model, 
+                                   optimizer, bcelogits_loss , 
+                                   'Contrastive_Loss', min_loss, 
+                                   max_auroc, n_epoch, PROJECT, GROUP,
+                                   NAME, RUN, BURN_IN, DEVICE)
+    return model, optimizer, min_loss, max_auroc
 
 def train_model(cfg):
-    ## data
-    train_binary_dataloader, train_contrastive_dataloader= load_data(cfg, 'train')
-#     for bidx, batch in enumerate(train_binary_dataloader):
-#         if bidx == 0:
-#             embed, labels = batch
-#             print('binary embed', embed.size(), 'labels', labels.size())
-#     print('done binary')
-#     for cidx, catch in enumerate(train_contrastive_dataloader):
-#         if cidx == 0:
-#             embed = catch
-#             print('contrastive embed', embed.size())
-
-    val_binary_dataloader, _ = load_data(cfg, cross='validation')
-    DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
-    
-    ## instantiate
-    Loss1 = hydra.utils.instantiate(cfg['Loss1']) ## triplet margin distance loss
-    Loss2 = hydra.utils.instantiate(cfg['Loss2']) ## bce
-    model = hydra.utils.instantiate(cfg['models']['esm2_15b'])
-    BURN_IN = cfg['burn_in_epochs']
+    # changing params
+    margin   = str(cfg['anneal_fn']['M_0']).replace('.', '')
+    time = datetime.now().strftime("%m_%d-%H_%M")
     
     # Training parameters
-    alternate_epochs = bool(cfg.get('alternate_epochs', False))
-    num_epochs = cfg['n_epochs']
-    learning_rate = cfg['lr']
-    job = cfg['job_type']
-    
-    #  run name + group
-    m   = str(cfg['anneal_fn']['M_0']).replace('.', '')
-    time = datetime.now().strftime("%m_%d-%H_%M")
-    nae = cfg['n_alternate_epoch']
-    NAME = f"alternatEpoch{nae}_{m}" if alternate_epochs else f"bce"
-    group = cfg["wandb"]["group"]  
-    proj = cfg['project']
-    seed = cfg['seed']
-    
-    ## seed
-    torch.manual_seed(seed)
-    np.random.seed(seed)
-    random.seed(seed) #
+    BURN_IN = cfg['burn_in_epochs']
+    ALTERNATE_EPOCHS = bool(cfg.get('alternate_epochs', False))
+    N_EPOCHS = cfg['n_epochs']
+    LR = cfg['lr']
+    JOBTYPE = cfg['job_type']
+    NAE = cfg['n_alternate_epoch']
+    NAME = f"alternatEpoch{NAE}_{margin}" if ALTERNATE_EPOCHS else f"bce"
+    GROUP = cfg["wandb"]["group"]  
+    PROJECT = cfg['project']
+    SEED = cfg['seed']
 
-    # start
+    ## set seed
+    torch.manual_seed(SEED)
+    np.random.seed(SEED)
+    random.seed(SEED) #
+
+    # initialize model check params
     min_loss =float('inf')
-    max_auroc = float('-inf')
-    run = wandb.init(
+    max_auroc = float('-inf')    
+
+    ## initialize wandb
+    RUN = wandb.init(
         entity="soderlinglab-dukecellbio",
-        project=proj,
-        job_type= job,
+        project=PROJECT,
+        job_type= JOBTYPE,
         name=NAME,
-        group= str(group),
+        group= str(GROUP),
         config=cfg,
         )
-    alpha_updates = {0: 'BCE',
-                    1: "TML"}
+    
+    wandb.define_metric("epoch")
+    wandb.define_metric(name = "Train/*", step_metric="epoch")
+    wandb.define_metric(name= "Validation/*", step_metric="epoch")
+    
+
+    ## data
+    train_binary_dataloader, train_contrastive_dataloader= load_data(cfg, 'train')
+    val_binary_dataloader, _ = load_data(cfg, cross='validation')
+    
+    ## instantiate working functions
+    contrastive_loss = hydra.utils.instantiate(cfg['Loss1']) ## triplet margin distance loss
+    bcelogits_loss = hydra.utils.instantiate(cfg['Loss2']) ## bce
+    model = hydra.utils.instantiate(cfg['models']['esm2_15b'])
+    DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
     model.to(DEVICE)
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-    for epoch in range(num_epochs):
-        model.train()
-        epoch_loss = 0.0
-        if alternate_epochs:
-            # alpha*loss1 + (1-alpha)*loss2
-            alpha = 1 if (epoch %nae ==0) else 0 ## loss1 gets freq update=
+    optimizer = torch.optim.Adam(model.parameters(), lr=LR)
+
+    alpha_updates = {0: bcelogits_loss,
+                     1: contrastive_loss}
+    
+    for e in range(N_EPOCHS):
+        if e % NAE == 0:
+            model, optimizer, min_loss, max_auroc = run_train_binary_loader(train_binary_dataloader, 
+                                                                            val_binary_dataloader, model, 
+                                                                            optimizer, bcelogits_loss,
+                                                                            min_loss, max_auroc, e, PROJECT,
+                                                                            GROUP, NAME, BURN_IN, RUN, DEVICE)
         else:
-            alpha = 0
-        pnc = Counter()
-        for batch_idx, batch in enumerate(train_contrastive_loader):
-            embed= batch # seq_embedding, biotin_pos
-            ## count pos and neg
-            pnc.update(labels.view(-1).tolist())
-
-            ## move to device
-            embed = embed.to(DEVICE)
-            labels = labels.to(DEVICE).float()
-            pos_len = pos_len.to(DEVICE)
-
-            # run model for this sequence (batch size always 1)
-            embed, preds = model(embed)
-            embed = embed.squeeze(0) # remove batch dim for inutitive passing thru loss
-            labels = labels.float().unsqueeze(-1)  # add columnar dimension to targets
-
-            # Zero gradients
-            optimizer.zero_grad(set_to_none=True)
-
-            # Calculate loss
-            loss1 = Loss1(embed, pos_len)
-            loss2 =  Loss2(preds, labels) ## params
-
-            ## alternate loss backprop w set alpha
-            l = alpha*loss1 + (1-alpha)*loss2
-            l.backward()
-
-            ## optimizer step
-            optimizer.step()
-            ## update margin
-            Loss1.step()
-
-            ## flatten for metrics
-            labels = labels.flatten().detach().cpu().clone()
-            preds = preds.flatten().detach().cpu().clone()
-
-        ## validate
-        v_acc, v_auroc, v_aupr, v_CM, v_loss = validate(cfg, val_loader, model, Loss1, Loss2, alpha)
-
-        ## log val metrics
-        val_metrics = {"acc": float(v_acc), "loss": float(v_loss), 'auroc': float(v_auroc), 'aupr': float(v_aupr)}
-        run.log(val_metrics)
-        print(f'Epoch [{epoch+1}/{num_epochs}]; Val Loss: {v_loss:.4f}, updating {alpha_updates[alpha]}')
-        
-        ## log best model
-        if (v_loss < min_loss or v_auroc > max_auroc) and epoch > BURN_IN:
-            safe_pnc = float(pnc) if hasattr(pnc, "__float__") else pnc
-            val_metrics.update({'epoch' : epoch, 'pnc': safe_pnc})
-            save_path = Path(f'/cwork/pkp14/Biotin/models/{proj}/{str(group)}/{NAME}_{epoch}.pth')
-            save_path.parent.mkdir(exist_ok=True, parents=True)   # create parent folder(s) if missing
-            opt_path = save_path.with_name(save_path.stem + "_opt.pth")
-            extra_data = {'embedding': tuple(embed.shape), 'preds': tuple(preds.shape),
-                         'preds_min': preds.min().item(),
-                         'preds_max': preds.max().item(), 'margin': float(Loss1.margin),
-                          'epoch': epoch, 'last_loss_update': alpha_updates[alpha],
-                          'model_path': str(save_path)
-                         }
-            art = wandb.Artifact(name=f"{NAME}_{epoch}", type="eval", metadata=extra_data)
-            with art.new_file("val_metrics.json", mode="w") as f:
-                json.dump(val_metrics
-                          , f, indent=2)
-            with art.new_file("extra_data.json", mode="w") as f:
-                json.dump(extra_data, f, indent=2)
-
-            alldata = val_metrics | extra_data
-            with open(save_path.parent / f'{save_path.stem}.json', mode='w') as f:
-                json.dump(alldata, f, indent=4)
-            run.log_artifact(art, aliases=["best"])
-            torch.save(model.state_dict(),save_path)
-            torch.save(optimizer.state_dict(), opt_path)
-            print(f"New best model @ epoch {epoch} saved with loss: {v_loss:.4f}, last loss update {alpha_updates[alpha]},"
-                  f"max_auroc: {max_auroc}")
-            min_loss = v_loss
-            max_auroc = v_auroc
-    run.finish()
+            model, optimizer, min_loss, max_auroc = run_train_contrastive_loader(train_contrastive_dataloader, val_binary_dataloader, model, optimizer,
+                                                                                 contrastive_loss,
+                                                                                 bcelogits_loss, min_loss, 
+                                                                                 max_auroc, e, PROJECT, GROUP,
+                                                                                 NAME, BURN_IN, RUN, DEVICE)
+    RUN.finish()
     return
 
-def save_best_model(model, optimizer, loss_used, val_preds, val_labels, val_loss, min_loss, val_auroc, max_auroc, posnegcounter, n_epoch, BURN_IN, PROJECT, GROUP, NAME):
-    ## log best model
-    if (v_loss < min_loss or v_auroc > max_auroc) and epoch > BURN_IN:
-        safe_pnc = float(pnc) if hasattr(pnc, "__float__") else pnc
-        val_metrics.update({'epoch' : epoch, 'pnc': safe_pnc})
-        save_path = Path(f'/cwork/pkp14/Biotin/models/{proj}/{str(group)}/{NAME}_{epoch}.pth')
-        save_path.parent.mkdir(exist_ok=True, parents=True)   # create parent folder(s) if missing
-        opt_path = save_path.with_name(save_path.stem + "_opt.pth")
-        extra_data = {'embedding': tuple(embed.shape), 'preds': tuple(preds.shape),
-                     'preds_min': preds.min().item(),
-                     'preds_max': preds.max().item(), 'margin': float(Loss1.margin),
-                      'epoch': epoch, 'last_loss_update': alpha_updates[alpha],
-                      'model_path': str(save_path)
-                     }
-        art = wandb.Artifact(name=f"{NAME}_{epoch}", type="eval", metadata=extra_data)
-        with art.new_file("val_metrics.json", mode="w") as f:
-            json.dump(val_metrics
-                      , f, indent=2)
-        with art.new_file("extra_data.json", mode="w") as f:
-            json.dump(extra_data, f, indent=2)
 
-        alldata = val_metrics | extra_data
-        with open(save_path.parent / f'{save_path.stem}.json', mode='w') as f:
-            json.dump(alldata, f, indent=4)
-        run.log_artifact(art, aliases=["best"])
-        torch.save(model.state_dict(),save_path)
-        torch.save(optimizer.state_dict(), opt_path)
-        print(f"New best model @ epoch {epoch} saved with loss: {v_loss:.4f}, last loss update {alpha_updates[alpha]},"
-              f"max_auroc: {max_auroc}")
-        min_loss = v_loss
-        max_auroc = v_auroc
-    return
+
+def save_best_model(model, optimizer, val_loss, min_loss, val_auroc, max_auroc, epoch, burn_in, project,
+                    group, name, run, loss_used, pnc=None):
+    improved = (val_loss < min_loss) or (val_auroc > max_auroc)
+    if not (improved and epoch > burn_in):
+        return min_loss, max_auroc
+
+    save_dir = Path(f"/cwork/pkp14/Biotin/models/{project}/{group}/{name}")
+    save_dir.mkdir(parents=True, exist_ok=True)
+    save_path = save_dir / f"best_model.pth"
+    opt_path  = save_dir / f"best_optimizer.pth"
+    
+    # serialize-safe
+    if pnc:
+        safe_pnc = dict(pnc) if hasattr(pnc, "items") else (float(pnc) if hasattr(pnc, "__float__") else pnc)
+
+    val_metrics = {
+        "epoch": int(epoch),
+        "val_loss": float(val_loss),
+        "val_auroc": float(val_auroc),
+        "posneg_counter": safe_pnc,
+    }
+
+    extra_data = {
+        "loss_used": str(loss_used) if loss_used is not None else None,
+        "epoch": int(epoch),
+        "model_path": str(save_path),
+    }
+
+    # sidecar JSON
+    with open(save_dir / f"metrics.json", "w") as f:
+        json.dump({**val_metrics, **extra_data}, f, indent=2)
+
+    # weights
+    torch.save(model.state_dict(), save_path)
+    torch.save(optimizer.state_dict(), opt_path)
+
+    art = wandb.Artifact(name=f"metrics", type="eval", metadata=extra_data)
+    with art.new_file("val_metrics.json", "w") as f:
+        json.dump(val_metrics, f, indent=2)
+    with art.new_file("extra_data.json", "w") as f:
+        json.dump(extra_data, f, indent=2)
+    run.log_artifact(art, aliases=["best"])
+
+    print(f"New best @ epoch {epoch}: loss={val_loss:.4f}, auroc={val_auroc:.4f}")
+    return float(val_loss), float(val_auroc)
+
 
 if __name__ == "__main__":
     main()
