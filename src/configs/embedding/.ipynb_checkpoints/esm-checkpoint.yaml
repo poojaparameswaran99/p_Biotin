@@ -1,0 +1,10 @@
+embedding:
+  _target_: utils.embedding.ESMembedding      # adjust to your actual module path
+  seqfile: /path/to/seqs.fasta
+  IDcol: 'Accession'
+  seqcol: 'seq'
+  esm: 'esm2_15b'
+  average_pool: False
+  seqtype: 'Protein'
+  project_name: 'Biotin'
+  overwrite: False

@@ -1,13 +1,29 @@
 defaults:
     - _self_
     - data: train-val-test
-    - models: model5
-#     - override hydra/sweeper/sampler: nsgaii
+    - models: model6
+    - override hydra/launcher: submitit_slurm
+    - override hydra/sweeper: basic #gride
+
 
 job_type: 'test'
-project: 'biotin-${hydra:runtime.choices.models}-Knegs'
+project: 'test-biotin-${hydra:runtime.choices.models}'
 seed: 123
-RUN_ID: 'titydtsp'
 best_model: '/cwork/pkp14/Biotin/models/biotin-model5-Knegs/TMLfrqupd_BCEless/alternatEpoch5_025_95.pth'
 
+
+hydra:
+    launcher:
+        timeout_min: 360 # 2 hours
+        tasks_per_node: 1
+        array_parallelism: 3   # run up to 3 jobs at once
+        cpus_per_task: 1
+        nodes: 1
+        partition: cellbio-dgx
+        account: singhlab
+        mem_gb: 32
+        name: ${hydra.job.name}
+        additional_parameters:
+          gres: gpu:1
+        stderr_to_stdout: true
 

@@ -1,0 +1,5 @@
+_target_: loss.MarginScheduledTripletLossFunction
+anneal_fn: ${anneal_fn}
+distance_fn: ${distance_fn}    # <— copies the selected distance config node here
+N_restart: 10
+step_per_call: false

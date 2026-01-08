@@ -1,0 +1,10 @@
+job_type: 'inference'
+project: 'inference-biotin-model6'
+seed: 123
+model_path: /cwork/pkp14/Biotin/models/biotin-model6/TMLfrqupd_BCEless/alternatEpoch10_00001/best_model.pth
+
+inference_file: /hpc/group/soderlinglab/user/pooja/projects/Biotin/src/data/new_inference/11101_SupplementalData_Normalized_101025.csv
+ID_col: 'Accession'
+seq_col: 'seq'
+positives_col: 'BiotinPosition'
+embeddings_path: /cwork/pkp14/Biotin/esm2_15b_embeds

@@ -5,7 +5,6 @@ binary:
         seq_col: 'seq'
         positives_col: 'BiotinPosition'
         embeddings_path: '/cwork/pkp14/Biotin/esm2_15b_embeds'
-        embedding_engine: ${embedding}     # <— ADD THIS
         _partial_: True
 
     dataloader:
@@ -18,9 +17,9 @@ binary:
 
 binary_dataset_files:
     train:
-        file: /hpc/group/soderlinglab/user/pooja/projects/Biotin/data/train-val-test/train.csv
+        file: /hpc/group/soderlinglab/user/pooja/projects/Biotin/data/train-val-test/train_trial.csv
     validation:
-        file: /hpc/group/soderlinglab/user/pooja/projects/Biotin/data/train-val-test/val.csv
+        file: /hpc/group/soderlinglab/user/pooja/projects/Biotin/data/train-val-test/val_trial.csv
     test:
         file: /hpc/group/soderlinglab/user/pooja/projects/Biotin/data/train-val-test/test.csv
 
@@ -35,8 +34,7 @@ contrastive:
         n_idx_col: 'neg_idx'
         seq_col: 'seq'
         embeddings_path: '/cwork/pkp14/Biotin/esm2_15b_embeds'
-        embedding_engine: ${embedding}     # <— ADD THIS
-        file: /hpc/group/soderlinglab/user/pooja/projects/Biotin/data/train-val-test/training_pairs.csv
+        file: /hpc/group/soderlinglab/user/pooja/projects/Biotin/data/train-val-test/trial_training_pairs.csv
     dataloader:
         _target_: torch.utils.data.DataLoader
         batch_size: 32
