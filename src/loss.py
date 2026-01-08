@@ -64,14 +64,7 @@ class MarginScheduledTripletLossFunction():
 
 
     def __call__(self, embedding: torch.Tensor):
-        n_embedding = embedding.size()
-        positives = [embedding.select(0, i) for i in n_embedding if i%3 ==0]
-        anchors = [embedding.select(0, i) for i in n_embedding if i%3 ==1]
-        
         ## test in console...
-        positives = embedding.index_select(0, torch.tensor(n_embedding[0::3]))
-        anchors   = embedding.index_select(0, torch.tensor(n_embedding[1::3]))
-        negatives = embedding.index_select(0, torch.tensor(n_embedding[2::3]))
         positives = embedding[:,  0, :]
         anchors   = embedding[:, 1, :]
         negatives = embedding[:,2,:]
@@ -86,3 +79,4 @@ class MarginScheduledTripletLossFunction():
         if self.step_per_call:
             self.step()        
         return loss
+
