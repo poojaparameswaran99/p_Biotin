@@ -11,7 +11,7 @@ from pathlib import Path
 
 
 class Model6(nn.Module):
-    def __init__(self, in_dim=5120, hidden_dim1=3415, hidden_dim2=2560, out_dim=1280):
+    def __init__(self, in_dim=5120, hidden_dim1=3145, hidden_dim2=2560, out_dim=1280):
         super(Model6, self).__init__()
         self.indim = in_dim
         self.hiddim1 = hidden_dim1
@@ -40,14 +40,14 @@ class Model6(nn.Module):
         self.block1 = nn.Sequential(self.fc1, self.ln1)
         self.block2 = nn.Sequential(self.fc2, self.ln2,  nn.ReLU()) # embed
         self.block3 = nn.Sequential(self.fc3, self.ln3, nn.ReLU())
-        self.block4 = nn.Sequential(self.fc4)
+        self.block4 = nn.Sequential(self.fc4) ## leave w logits for bce loss
 
         
     def forward(self, x):
         x = self.block1(x)
         x = self.block2(x)
         x0 = self.block3(x)
-        x1 = self.block4(x0)
+        x1 = self.block4(x0).squeeze() ## return vector n instead of [n, 1]
         return x0, x1
     
 
@@ -102,7 +102,7 @@ class Model5(nn.Module):
     def forward(self, x):
         x = self.block1(x)
         x0 = self.block2(x)
-        x1 = self.block3(x0)
+        x1 = self.block3(x0).squeeze(-1)
         return x0, x1
     
     
